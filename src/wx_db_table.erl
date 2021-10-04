@@ -78,6 +78,7 @@ start_link(Parent, Args) ->
 	{ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
 	{stop, Reason :: term()} | ignore).
 init({Parent, {Tab, Opts}}) ->
+	erlang:register(Tab, self()),
 	put(?Statistics, #statistics{}),
 	Type = wx_lib:get_value(Opts, type),
 	StoreM = list_to_atom(lists:concat([?StoreModule, Type])),
@@ -200,7 +201,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 handle(Code, Key, Info, Lock, LockTime, IsMulti, FromPid, #state{tab = Tab} = State) ->
 	?DEBUG([Code, Key, Info, Lock, LockTime, IsMulti, FromPid, State]),
-%%	Lock = make_lock(Lock0, FromPid),
 	Now = wx_time:now_millisec(),
 	case get(Key) of
 		undefined ->
@@ -231,7 +231,7 @@ handle(Code, Key, Info, Lock, LockTime, IsMulti, FromPid, #state{tab = Tab} = St
 					handle_statistics(Code, 1, 1, 1, Now - OldNow),
 					put(Key, {Lock, Code, FromPid, IsMulti, Now, Now + LockTime});
 				true ->
-					handle_statistics(Code, 0, 1, 0, Now - OldNow),
+					handle_statistics(Code, 0, 1, 1, Now - OldNow),
 					erase(Key)
 			end,
 			D = handle_(Code, Key, Info, State),
