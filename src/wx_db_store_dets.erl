@@ -7,7 +7,7 @@
 
 %% API
 -export([start_link/2]).
--export([write/3, delete/2]).
+-export([write/3, delete/2, store_batch/2]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -22,6 +22,8 @@
 -define(Status_Close, 0).
 -define(Status_Run, 1).
 
+
+
 -record(state, {status = ?Status_Close, tab, parent}).
 
 -include_lib("wx_log_library/include/wx_log.hrl").
@@ -33,6 +35,8 @@ write(Pid, K, V) ->
 	gen_server:cast(Pid, {w, K, V}).
 delete(Pid, K) ->
 	gen_server:cast(Pid, {d, K}).
+store_batch(Pid, {UpList, DelList} = List) when is_list(UpList), is_list(DelList) ->
+	gen_server:cast(Pid, {store_batch, List}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -102,6 +106,9 @@ handle_call(_Request, _From, State) ->
 	{noreply, NewState :: #state{}} |
 	{noreply, NewState :: #state{}, timeout() | hibernate} |
 	{stop, Reason :: term(), NewState :: #state{}}).
+handle_cast({store_batch, ListInfo}, #state{tab = Tab} = State) ->
+	do_store_batch(Tab, ListInfo),
+	{noreply, State, ?HIBERNATE_TIMEOUT};
 handle_cast({w, K, V}, #state{tab = Tab} = State) ->
 	ok = dets:insert(Tab, {K, V}),
 	{noreply, State, ?HIBERNATE_TIMEOUT};
@@ -163,6 +170,45 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-close(Tab)->
+close(Tab) ->
 	dets:sync(Tab),
 	dets:close(Tab).
+
+do_store_batch(Tab, {UpList, DelList}) ->
+	do_store_batch_up(Tab, UpList),
+	do_store_batch_del(Tab, DelList).
+do_store_batch_up(Tab, UpList) ->
+	List = [lists:nth(1, ets:lookup(Tab, E)) || E <- UpList],
+	dets:insert(Tab, List).
+do_store_batch_del(Tab, DelList) ->
+	dets_delete(Tab, DelList).
+%%%-----------------------------------------------------------------
+%%% The following functions are from the dets module
+%%%-----------------------------------------------------------------
+dets_delete(Tab, DelList) ->
+	badarg(treq(Tab, {delete_key, DelList}), [Tab, DelList]).
+-define(DETS_CALL(Pid, Req), {'$dets_call', Pid, Req}).
+badarg(badarg, A) ->
+	erlang:error(badarg, A);
+badarg(Reply, _A) ->
+	Reply.
+treq(Tab, R) ->
+	case catch dets_server:get_pid(Tab) of
+		Pid when is_pid(Pid) ->
+			req(Pid, R);
+		_ ->
+			badarg
+	end.
+req(Proc, R) ->
+	Ref = erlang:monitor(process, Proc),
+	Proc ! ?DETS_CALL(self(), R),
+	receive
+		{'DOWN', Ref, process, Proc, _Info} ->
+			badarg;
+		{Proc, Reply} ->
+			erlang:demonitor(Ref, [flush]),
+			Reply
+	end.
+%%%-----------------------------------------------------------------
+%%% end
+%%%-----------------------------------------------------------------

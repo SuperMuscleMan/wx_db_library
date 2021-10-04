@@ -28,6 +28,11 @@
 -define(Handle_Lock, l).%% 锁
 -define(Handle_UnLock, un).%% 解锁
 
+-define(DelayTimer, delay_timer).                %% 延迟dick
+-define(DelayTimerMilliSecond, 3000).            %% 延迟3s
+-define(DelayStoreTree, 'delay_up_tree').        %% 延迟存储树dick
+-define(DelayUp, 1).        %% 延迟更新
+-define(DelayDel, 0).        %% 延迟删除
 
 -record(state, {store_m, tab, pid, parent}).
 -define(Statistics, 'statistics_db').
@@ -161,7 +166,11 @@ handle_cast(_Request, State) ->
 	{noreply, NewState :: #state{}} |
 	{noreply, NewState :: #state{}, timeout() | hibernate} |
 	{stop, Reason :: term(), NewState :: #state{}}).
-handle_info(timeout, State)->
+handle_info(delay_store, State) ->
+	erase(?DelayTimer),
+	do_delay_store(State),
+	{noreply, State, ?Hibernate_TimeOut};
+handle_info(timeout, State) ->
 	{noreply, State, hibernate};
 handle_info(_Info, State) ->
 	{noreply, State, ?Hibernate_TimeOut}.
@@ -351,12 +360,64 @@ get_data(Tab, Key) ->
 	end.
 set_data(Tab, StoreM, StorePid, Key, Val) ->
 	true = ets:insert(Tab, {Key, Val}),
-	StoreM:write(StorePid, Key, Val).
+	delay_store(Key, ?DelayUp).
+%%	StoreM:write(StorePid, Key, Val).
 del_data(Tab, StoreM, StorePid, Key) ->
 	true = ets:delete(Tab, Key),
-	StoreM:delete(StorePid, Key).
+	delay_store(Key, ?DelayDel).
+%%	StoreM:delete(StorePid, Key).
 
 err_lock_timeout(Tab, Now, {OldLock, OldCode, OldFromPid, OldMulti, OldNow, OldLockEndTime}) ->
 	?ErrDb([db_timeout, {tab, Tab}, {oldlock, OldLock}, {oldcode, OldCode}, {oldfrom_pid, OldFromPid},
 		{oldMulti, OldMulti},
 		{oldlock_timeout, OldLockEndTime - OldNow}, {oldlock_time_real, Now - OldNow}]).
+
+%% 延迟树
+delay_store(Key, Type) ->
+	Tree = get_delay_store(),
+	case gb_trees:lookup(Key, Tree) of
+		{value, Type} ->
+			ok;
+		{value, _} ->
+			set_delay_store(gb_trees:update(Key, Type, Tree)),
+			delay_timer();
+		none ->
+			set_delay_store(gb_trees:insert(Key, Type, Tree)),
+			delay_timer()
+	end.
+get_delay_store() ->
+	case get(?DelayStoreTree) of
+		undefined ->
+			gb_trees:empty();
+		V ->
+			V
+	end.
+set_delay_store(Tree) ->
+	put(?DelayStoreTree, Tree).
+erase_delay_store() ->
+	erase(?DelayStoreTree).
+delay_timer() ->
+	case get(?DelayTimer) of
+		undefined ->
+			put(?DelayTimer, erlang:send_after(?DelayTimerMilliSecond, self(), delay_store));
+		Timer ->
+			case erlang:read_timer(Timer) of
+				false ->
+					put(?DelayTimer, erlang:send_after(?DelayTimerMilliSecond, self(), delay_store));
+				_ ->
+					ok
+			end
+	end.
+
+do_delay_store(#state{store_m = StoreM, pid = StorePid}) ->
+	Tree = get_delay_store(),
+	erase_delay_store(),
+	Iterator = gb_trees:iterator(Tree),
+	List = split_tree(gb_trees:next(Iterator), [], []),
+	StoreM:store_batch(StorePid, List).
+split_tree({K, ?DelayUp, Iterator}, UpList, DelList) ->
+	split_tree(gb_trees:next(Iterator), [K | UpList], DelList);
+split_tree({K, ?DelayDel, Iterator}, UpList, DelList) ->
+	split_tree(gb_trees:next(Iterator), UpList, [K | DelList]);
+split_tree(none, UpList, DelList) ->
+	{UpList, DelList}.
